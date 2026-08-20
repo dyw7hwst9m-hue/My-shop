@@ -1,11 +1,20 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+} from 'react';
+
 import { CustomerProfile, UserRole } from '../types';
+
 import {
   getCustomersService,
   saveCustomerProfileService,
   uploadImageService,
 } from '../firebase/services';
+
 import { initFirebase } from '../firebase/config';
+
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
@@ -13,415 +22,1480 @@ import {
   onAuthStateChanged,
 } from 'firebase/auth';
 
-interface AuthContextType {
-  currentUser: CustomerProfile | null;
-  role: UserRole; // Active view role ('customer' | 'owner')
-  isOwner: boolean; // Does the user have store owner privileges?
-  isAuthenticated: boolean;
-  isLoading: boolean;
-  loginError: string | null;
-  signUpCustomer: (data: {
-    email: string;
-    password?: string;
-    nickname: string;
-    age: number;
-    birthDate?: string;
-    facePhoto?: File | string;
-    phone?: string;
-    address?: string;
-    isOwner?: boolean;
-  }) => Promise<{ success: boolean; error?: string }>;
-  login: (email: string, password?: string) => Promise<{ success: boolean; error?: string }>;
-  loginAsOwner: () => Promise<void>;
-  switchRole: (newRole: UserRole) => void;
-  toggleRole: () => void;
-  grantOwnerPermission: (isOwnerPermission: boolean) => Promise<void>;
-  logout: () => Promise<void>;
-  updateProfile: (data: Partial<CustomerProfile>, newFacePhoto?: File | string) => Promise<void>;
-}
+/**
+ * =========================================================
+ * OWNER CONFIG
+ * =========================================================
+ *
+ * ร้านนี้มีเจ้าของเพียงคนเดียว
+ *
+ * สำคัญ:
+ * ห้ามใช้ data.isOwner จากแบบสมัครสมาชิกเป็นตัวตัดสิน
+ * เพราะลูกค้าสามารถส่งค่า isOwner=true เองได้
+ */
+export const OWNER_EMAIL = 'ใส่อีเมลเจ้าของร้านตรงนี้';
 
-export const OWNER_EMAIL = 'thitapornmukji@gmail.com';
-const AUTH_STORAGE_KEY = 'my_shop_auth_session_user';
+
+/**
+ * =========================================================
+ * STORAGE KEYS
+ * =========================================================
+ */
+
+const AUTH_STORAGE_KEY = 'my_shop_auth_session';
 const ROLE_STORAGE_KEY = 'my_shop_auth_role';
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState<CustomerProfile | null>(null);
-  const [role, setRole] = useState<UserRole>('customer');
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [loginError, setLoginError] = useState<string | null>(null);
+/**
+ * =========================================================
+ * AUTH CONTEXT TYPE
+ * =========================================================
+ */
 
-  // Helper to check if a profile has owner privileges
-  const checkHasOwnerPrivilege = (user: CustomerProfile | null): boolean => {
-    if (!user) return false;
-    if (user.email && user.email.toLowerCase() === OWNER_EMAIL.toLowerCase()) return true;
-    if (user.isOwner === true) return true;
-    if (user.roles && user.roles.includes('owner')) return true;
-    return false;
-  };
+interface SignUpCustomerData {
+  email: string;
+  password?: string;
+  nickname: string;
+  age: number;
+  birthDate?: string;
+  facePhoto?: File | string;
+  phone?: string;
+  address?: string;
 
-  useEffect(() => {
-    async function initAuth() {
-      setIsLoading(true);
-      const { auth, isConfigured } = initFirebase();
+  /**
+   * รับค่าไว้เพื่อไม่ให้ component เดิม error
+   * แต่จะไม่ถูกใช้เพื่อให้สิทธิ์ owner
+   */
+  isOwner?: boolean;
+}
 
-      if (isConfigured && auth) {
-        onAuthStateChanged(auth, async (fbUser) => {
-          if (fbUser && fbUser.email) {
-            const emailLower = fbUser.email.toLowerCase();
-            const customers = await getCustomersService();
-            let matched = customers.find((c) => c.email.toLowerCase() === emailLower || c.id === fbUser.uid);
+interface AuthContextType {
+  currentUser: CustomerProfile | null;
 
-            const isEmailOwner = emailLower === OWNER_EMAIL.toLowerCase();
+  role: UserRole;
 
-            if (matched) {
-              if (isEmailOwner && (!matched.isOwner || !matched.roles?.includes('owner'))) {
-                matched = {
-                  ...matched,
-                  isOwner: true,
-                  roles: ['customer', 'owner'],
-                };
-                await saveCustomerProfileService(matched);
-              }
-              const savedRole = localStorage.getItem(ROLE_STORAGE_KEY) as UserRole | null;
-              const hasOwner = checkHasOwnerPrivilege(matched);
-              const effectiveRole: UserRole = savedRole || (hasOwner ? 'owner' : 'customer');
-              saveSession(matched, effectiveRole);
-            } else {
-              // Create unified profile in Firestore
-              const newProfile: CustomerProfile = {
-                id: fbUser.uid,
-                email: emailLower,
-                nickname: fbUser.displayName || (isEmailOwner ? 'เจ้าของร้าน' : 'ลูกค้า'),
-                age: 28,
-                createdAt: new Date().toISOString(),
-                orderCount: 0,
-                totalSpent: 0,
-                status: 'active',
-                isOwner: isEmailOwner,
-                roles: isEmailOwner ? ['customer', 'owner'] : ['customer'],
-              };
-              await saveCustomerProfileService(newProfile);
-              saveSession(newProfile, isEmailOwner ? 'owner' : 'customer');
-            }
-          } else {
-            restoreLocalSession();
-          }
-          setIsLoading(false);
-        });
-      } else {
-        restoreLocalSession();
-        setIsLoading(false);
-      }
-    }
+  isOwner: boolean;
 
-    function restoreLocalSession() {
-      try {
-        const savedUserJson = localStorage.getItem(AUTH_STORAGE_KEY);
-        const savedRole = localStorage.getItem(ROLE_STORAGE_KEY) as UserRole | null;
-        if (savedUserJson) {
-          const user: CustomerProfile = JSON.parse(savedUserJson);
-          const hasOwner = checkHasOwnerPrivilege(user);
-          // ensure consistent owner flags
-          if (hasOwner) {
-            user.isOwner = true;
-            if (!user.roles) user.roles = ['customer', 'owner'];
-            else if (!user.roles.includes('owner')) user.roles.push('owner');
-          }
-          setCurrentUser(user);
-          setRole(savedRole || (hasOwner ? 'owner' : 'customer'));
-        } else {
-          setRole('customer');
-        }
-      } catch (e) {
-        console.error('Session restore error:', e);
-      }
-    }
+  isAuthenticated: boolean;
 
-    initAuth();
-  }, []);
+  isLoading: boolean;
 
-  const saveSession = (user: CustomerProfile | null, userRole: UserRole) => {
+  loginError: string | null;
+
+  signUpCustomer: (
+    data: SignUpCustomerData
+  ) => Promise<{
+    success: boolean;
+    error?: string;
+  }>;
+
+  login: (
+    email: string,
+    password: string
+  ) => Promise<{
+    success: boolean;
+    error?: string;
+  }>;
+
+  loginAsOwner: () => Promise<void>;
+
+  switchRole: (newRole: UserRole) => void;
+
+  toggleRole: () => void;
+
+  grantOwnerPermission: (
+    isOwnerPermission: boolean
+  ) => Promise<void>;
+
+  logout: () => Promise<void>;
+
+  updateProfile: (
+    data: Partial<CustomerProfile>,
+    newFacePhoto?: File | string
+  ) => Promise<void>;
+}
+
+
+/**
+ * =========================================================
+ * CONTEXT
+ * =========================================================
+ */
+
+const AuthContext = createContext<AuthContextType | undefined>(
+  undefined
+);
+
+
+/**
+ * =========================================================
+ * OWNER CHECK
+ * =========================================================
+ *
+ * เจ้าของร้านถูกกำหนดจากอีเมลที่ตั้งไว้ในระบบเท่านั้น
+ *
+ * ไม่รับ isOwner จาก form สมัครสมาชิก
+ */
+const checkIsOwnerAccount = (
+  user: CustomerProfile | null
+): boolean => {
+  if (!user) return false;
+
+  const email = String(user.email || '')
+    .trim()
+    .toLowerCase();
+
+  const ownerEmail = OWNER_EMAIL
+    .trim()
+    .toLowerCase();
+
+  return (
+    email !== '' &&
+    ownerEmail !== '' &&
+    email === ownerEmail
+  );
+};
+
+
+/**
+ * =========================================================
+ * AUTH PROVIDER
+ * =========================================================
+ */
+
+export const AuthProvider: React.FC<{
+  children: React.ReactNode;
+}> = ({ children }) => {
+
+  const [currentUser, setCurrentUser] =
+    useState<CustomerProfile | null>(null);
+
+  const [role, setRole] =
+    useState<UserRole>('customer');
+
+  const [isLoading, setIsLoading] =
+    useState<boolean>(true);
+
+  const [loginError, setLoginError] =
+    useState<string | null>(null);
+
+
+  /**
+   * -------------------------------------------------------
+   * COMPUTED OWNER STATUS
+   * -------------------------------------------------------
+   */
+
+  const hasOwnerPermission =
+    checkIsOwnerAccount(currentUser);
+
+
+  const effectiveRole: UserRole =
+    hasOwnerPermission && role === 'owner'
+      ? 'owner'
+      : 'customer';
+
+
+  /**
+   * -------------------------------------------------------
+   * SAVE SESSION
+   * -------------------------------------------------------
+   */
+
+  const saveSession = (
+    user: CustomerProfile | null,
+    userRole: UserRole
+  ) => {
+
     setCurrentUser(user);
-    setRole(userRole);
+
+    /**
+     * ป้องกันไม่ให้ user ธรรมดาบังคับ role เป็น owner
+     */
+    const safeRole: UserRole =
+      user && checkIsOwnerAccount(user)
+        ? userRole
+        : 'customer';
+
+    setRole(safeRole);
+
     if (user) {
-      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
-      localStorage.setItem(ROLE_STORAGE_KEY, userRole);
+      localStorage.setItem(
+        AUTH_STORAGE_KEY,
+        JSON.stringify(user)
+      );
+
+      localStorage.setItem(
+        ROLE_STORAGE_KEY,
+        safeRole
+      );
     } else {
       localStorage.removeItem(AUTH_STORAGE_KEY);
       localStorage.removeItem(ROLE_STORAGE_KEY);
     }
   };
 
-  const signUpCustomer = async (data: {
-    email: string;
-    password?: string;
-    nickname: string;
-    age: number;
-    birthDate?: string;
-    facePhoto?: File | string;
-    phone?: string;
-    address?: string;
-    isOwner?: boolean;
-  }): Promise<{ success: boolean; error?: string }> => {
+
+  /**
+   * -------------------------------------------------------
+   * RESTORE LOCAL SESSION
+   * -------------------------------------------------------
+   */
+
+  const restoreLocalSession = () => {
+
     try {
-      setLoginError(null);
-      const emailLower = data.email.trim().toLowerCase();
-      const isEmailOwner = emailLower === OWNER_EMAIL.toLowerCase() || data.isOwner === true;
 
-      // Check duplicate email in customers database
-      const existingCustomers = await getCustomersService();
-      const duplicate = existingCustomers.find((c) => c.email.toLowerCase() === emailLower);
-      if (duplicate) {
-        return { success: false, error: 'อีเมลนี้ถูกใช้งานแล้ว กรุณาใช้อีเมลอื่นหรือเข้าสู่ระบบ' };
+      const savedUserJson =
+        localStorage.getItem(AUTH_STORAGE_KEY);
+
+      const savedRole =
+        localStorage.getItem(
+          ROLE_STORAGE_KEY
+        ) as UserRole | null;
+
+      if (!savedUserJson) {
+        setCurrentUser(null);
+        setRole('customer');
+        return;
       }
 
-      let userId = `user-${Date.now()}`;
-      const { auth, isConfigured } = initFirebase();
+      const user =
+        JSON.parse(savedUserJson) as CustomerProfile;
 
-      if (isConfigured && auth && data.password) {
-        try {
-          const res = await createUserWithEmailAndPassword(auth, emailLower, data.password);
-          userId = res.user.uid;
-        } catch (fbErr: any) {
-          if (fbErr.code === 'auth/email-already-in-use') {
-            return { success: false, error: 'อีเมลนี้ถูกลงทะเบียนในระบบ Firebase แล้ว' };
-          }
-          if (fbErr.code === 'auth/weak-password') {
-            return { success: false, error: 'รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร' };
-          }
-          console.warn('Firebase signup failed, continuing local fallback:', fbErr);
-        }
-      }
+      const owner =
+        checkIsOwnerAccount(user);
 
-      // Upload face photo
-      let facePhotoUrl = 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=400&auto=format&fit=crop&q=80';
-      if (data.facePhoto) {
-        const uploadPath = `customer_verifications/${userId}/face_${Date.now()}.jpg`;
-        facePhotoUrl = await uploadImageService(data.facePhoto, uploadPath);
-      }
+      /**
+       * ถ้าไม่ใช่เจ้าของร้าน
+       * บังคับกลับเป็น customer
+       */
+      const safeRole: UserRole =
+        owner && savedRole === 'owner'
+          ? 'owner'
+          : 'customer';
 
-      const newCustomer: CustomerProfile = {
-        id: userId,
-        email: emailLower,
-        nickname: data.nickname.trim(),
-        age: Number(data.age) || 25,
-        birthDate: data.birthDate || '',
-        facePhotoUrl,
-        createdAt: new Date().toISOString(),
-        orderCount: 0,
-        totalSpent: 0,
-        status: 'active',
-        phone: data.phone || '',
-        address: data.address || '',
-        isOwner: isEmailOwner,
-        roles: isEmailOwner ? ['customer', 'owner'] : ['customer'],
-      };
+      setCurrentUser(user);
+      setRole(safeRole);
 
-      await saveCustomerProfileService(newCustomer);
-      saveSession(newCustomer, isEmailOwner ? 'owner' : 'customer');
+      /**
+       * เขียนค่าที่ปลอดภัยกลับเข้า localStorage
+       */
+      localStorage.setItem(
+        ROLE_STORAGE_KEY,
+        safeRole
+      );
 
-      return { success: true };
-    } catch (err: any) {
-      console.error('Sign up error:', err);
-      return { success: false, error: err.message || 'เกิดข้อผิดพลาดในการสมัครสมาชิก' };
+    } catch (error) {
+
+      console.error(
+        'Session restore error:',
+        error
+      );
+
+      localStorage.removeItem(
+        AUTH_STORAGE_KEY
+      );
+
+      localStorage.removeItem(
+        ROLE_STORAGE_KEY
+      );
+
+      setCurrentUser(null);
+      setRole('customer');
     }
   };
 
-  const login = async (email: string, password?: string): Promise<{ success: boolean; error?: string }> => {
-    try {
-      setLoginError(null);
-      const emailLower = email.trim().toLowerCase();
-      const isEmailOwner = emailLower === OWNER_EMAIL.toLowerCase();
 
-      const { auth, isConfigured } = initFirebase();
-      if (isConfigured && auth && password) {
-        try {
-          const res = await signInWithEmailAndPassword(auth, emailLower, password);
-          const customers = await getCustomersService();
-          let found = customers.find((c) => c.email.toLowerCase() === emailLower || c.id === res.user.uid);
-          if (found) {
-            if (isEmailOwner && !found.isOwner) {
-              found.isOwner = true;
-              found.roles = ['customer', 'owner'];
-              await saveCustomerProfileService(found);
+  /**
+   * -------------------------------------------------------
+   * INITIAL AUTH
+   * -------------------------------------------------------
+   */
+
+  useEffect(() => {
+
+    let unsubscribe:
+      | (() => void)
+      | undefined;
+
+    const initAuth = async () => {
+
+      setIsLoading(true);
+
+      try {
+
+        const {
+          auth,
+          isConfigured,
+        } = initFirebase();
+
+        /**
+         * Firebase ยังไม่ได้ตั้งค่า
+         * ให้ใช้ local session ไปก่อน
+         */
+        if (!isConfigured || !auth) {
+
+          restoreLocalSession();
+
+          setIsLoading(false);
+
+          return;
+        }
+
+
+        unsubscribe =
+          onAuthStateChanged(
+            auth,
+            async (fbUser) => {
+
+              try {
+
+                if (
+                  fbUser &&
+                  fbUser.email
+                ) {
+
+                  const emailLower =
+                    fbUser.email
+                      .trim()
+                      .toLowerCase();
+
+                  const customers =
+                    await getCustomersService();
+
+                  let matched =
+                    customers.find(
+                      (customer) =>
+                        String(
+                          customer.email || ''
+                        )
+                          .trim()
+                          .toLowerCase() ===
+                        emailLower
+                    );
+
+
+                    /**
+                     * ------------------------------------------------
+                     * EXISTING CUSTOMER
+                     * ------------------------------------------------
+                     */
+
+                  if (matched) {
+
+                    /**
+                     * ตรวจ owner จาก email จริงเท่านั้น
+                     */
+                    const owner =
+                      emailLower ===
+                      OWNER_EMAIL
+                        .trim()
+                        .toLowerCase();
+
+
+                    if (owner) {
+
+                      matched = {
+                        ...matched,
+                        isOwner: true,
+                        roles: [
+                          'customer',
+                          'owner',
+                        ],
+                      };
+
+                      await saveCustomerProfileService(
+                        matched
+                      );
+
+                    } else {
+
+                      /**
+                       * ลูกค้าทั่วไป
+                       * ห้ามมี owner privilege
+                       */
+                      matched = {
+                        ...matched,
+                        isOwner: false,
+                        roles: ['customer'],
+                      };
+
+                      await saveCustomerProfileService(
+                        matched
+                      );
+                    }
+
+
+                    const savedRole =
+                      localStorage.getItem(
+                        ROLE_STORAGE_KEY
+                      ) as UserRole | null;
+
+
+                    const safeRole: UserRole =
+                      owner &&
+                      savedRole === 'owner'
+                        ? 'owner'
+                        : 'customer';
+
+
+                    saveSession(
+                      matched,
+                      safeRole
+                    );
+
+                  } else {
+
+                    /**
+                     * ------------------------------------------------
+                     * FIRST LOGIN / PROFILE NOT FOUND
+                     * ------------------------------------------------
+                     */
+
+                    const owner =
+                      emailLower ===
+                      OWNER_EMAIL
+                        .trim()
+                        .toLowerCase();
+
+
+                    const newProfile:
+                      CustomerProfile = {
+                        id: fbUser.uid,
+
+                        email: emailLower,
+
+                        nickname:
+                          fbUser.displayName ||
+                          (owner
+                            ? 'เจ้าของร้าน'
+                            : 'ลูกค้า'),
+
+                        age: 0,
+
+                        birthDate: '',
+
+                        facePhotoUrl: '',
+
+                        createdAt:
+                          new Date().toISOString(),
+
+                        orderCount: 0,
+
+                        totalSpent: 0,
+
+                        status: 'active',
+
+                        phone: '',
+
+                        address: '',
+
+                        /**
+                         * owner จาก email เท่านั้น
+                         */
+                        isOwner: owner,
+
+                        roles: owner
+                          ? [
+                              'customer',
+                              'owner',
+                            ]
+                          : ['customer'],
+                      };
+
+
+                    await saveCustomerProfileService(
+                      newProfile
+                    );
+
+
+                    saveSession(
+                      newProfile,
+                      owner
+                        ? 'owner'
+                        : 'customer'
+                    );
+                  }
+
+                } else {
+
+                  restoreLocalSession();
+                }
+
+              } catch (error) {
+
+                console.error(
+                  'Firebase auth state error:',
+                  error
+                );
+
+                restoreLocalSession();
+
+              } finally {
+
+                setIsLoading(false);
+              }
             }
-            saveSession(found, found.isOwner ? 'owner' : 'customer');
-            return { success: true };
-          }
-        } catch (fbErr: any) {
-          console.warn('Firebase login attempt fallback to local check:', fbErr);
-        }
+          );
+
+      } catch (error) {
+
+        console.error(
+          'Firebase initialization error:',
+          error
+        );
+
+        restoreLocalSession();
+
+        setIsLoading(false);
+      }
+    };
+
+
+    initAuth();
+
+
+    return () => {
+
+      if (unsubscribe) {
+        unsubscribe();
       }
 
-      // Check existing customer profiles
-      const customers = await getCustomersService();
-      let customer = customers.find((c) => c.email.toLowerCase() === emailLower);
+    };
 
-      if (customer) {
-        if (customer.status === 'suspended') {
-          return { success: false, error: 'บัญชีนี้ถูกระงับการใช้งานชั่วคราว กรุณาติดต่อร้านค้า' };
-        }
-        if (isEmailOwner && !customer.isOwner) {
-          customer = { ...customer, isOwner: true, roles: ['customer', 'owner'] };
-          await saveCustomerProfileService(customer);
-        }
-        saveSession(customer, checkHasOwnerPrivilege(customer) ? 'owner' : 'customer');
-        return { success: true };
-      }
+  }, []);
 
-      // If email is the registered owner email but not found in profile list yet
-      if (isEmailOwner) {
-        const ownerUser: CustomerProfile = {
-          id: `owner-${Date.now()}`,
-          email: OWNER_EMAIL,
-          nickname: 'เจ้าของร้าน (Admin)',
-          age: 32,
-          createdAt: new Date().toISOString(),
-          orderCount: 0,
-          totalSpent: 0,
-          status: 'active',
-          phone: '089-123-4567',
-          address: 'ร้านค้าหลัก',
-          isOwner: true,
-          roles: ['customer', 'owner'],
+
+  /**
+   * =======================================================
+   * SIGN UP CUSTOMER
+   * =======================================================
+   */
+
+  const signUpCustomer = async (
+    data: SignUpCustomerData
+  ): Promise<{
+    success: boolean;
+    error?: string;
+  }> => {
+
+    try {
+
+      setLoginError(null);
+
+
+      const emailLower =
+        data.email
+          .trim()
+          .toLowerCase();
+
+
+      /**
+       * -----------------------------------------------
+       * ตรวจข้อมูลพื้นฐาน
+       * -----------------------------------------------
+       */
+
+      if (!emailLower) {
+        return {
+          success: false,
+          error: 'กรุณากรอกอีเมล',
         };
-        await saveCustomerProfileService(ownerUser);
-        saveSession(ownerUser, 'owner');
-        return { success: true };
       }
+
+
+      if (!data.nickname.trim()) {
+        return {
+          success: false,
+          error: 'กรุณากรอกชื่อ',
+        };
+      }
+
+
+      /**
+       * -----------------------------------------------
+       * ห้ามสมัครด้วย OWNER EMAIL
+       * -----------------------------------------------
+       *
+       * เจ้าของร้านใช้บัญชีเจ้าของร้านเท่านั้น
+       */
+      if (
+        emailLower ===
+        OWNER_EMAIL
+          .trim()
+          .toLowerCase()
+      ) {
+
+        return {
+          success: false,
+          error:
+            'อีเมลนี้เป็นบัญชีเจ้าของร้าน กรุณาเข้าสู่ระบบเจ้าของร้าน',
+        };
+      }
+
+
+      /**
+       * -----------------------------------------------
+       * CHECK DUPLICATE CUSTOMER
+       * -----------------------------------------------
+       */
+
+      const existingCustomers =
+        await getCustomersService();
+
+
+      const duplicate =
+        existingCustomers.find(
+          (customer) =>
+            String(customer.email || '')
+              .trim()
+              .toLowerCase() ===
+            emailLower
+        );
+
+
+      if (duplicate) {
+
+        return {
+          success: false,
+          error:
+            'อีเมลนี้ถูกใช้งานแล้ว กรุณาใช้อีเมลอื่นหรือเข้าสู่ระบบ',
+        };
+      }
+
+
+      /**
+       * -----------------------------------------------
+       * CREATE FIREBASE ACCOUNT
+       * -----------------------------------------------
+       */
+
+      let userId =
+        `user-${Date.now()}`;
+
+
+      const {
+        auth,
+        isConfigured,
+      } = initFirebase();
+
+
+      if (
+        isConfigured &&
+        auth &&
+        data.password
+      ) {
+
+        try {
+
+          const result =
+            await createUserWithEmailAndPassword(
+              auth,
+              emailLower,
+              data.password
+            );
+
+          userId =
+            result.user.uid;
+
+        } catch (firebaseError: any) {
+
+          if (
+            firebaseError?.code ===
+            'auth/email-already-in-use'
+          ) {
+
+            return {
+              success: false,
+              error:
+                'อีเมลนี้ถูกลงทะเบียนใน Firebase แล้ว',
+            };
+          }
+
+
+          if (
+            firebaseError?.code ===
+            'auth/weak-password'
+          ) {
+
+            return {
+              success: false,
+              error:
+                'รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร',
+            };
+          }
+
+          console.warn(
+            'Firebase signup failed:',
+            firebaseError
+          );
+        }
+      }
+
+
+      /**
+       * -----------------------------------------------
+       * UPLOAD FACE PHOTO
+       * -----------------------------------------------
+       */
+
+      let facePhotoUrl = '';
+
+
+      if (data.facePhoto) {
+
+        try {
+
+          const uploadPath =
+            `customer_verifications/${userId}/face_${Date.now()}.jpg`;
+
+
+          facePhotoUrl =
+            await uploadImageService(
+              data.facePhoto,
+              uploadPath
+            );
+
+        } catch (uploadError) {
+
+          console.warn(
+            'Face photo upload failed:',
+            uploadError
+          );
+        }
+      }
+
+
+      /**
+       * -----------------------------------------------
+       * CREATE CUSTOMER PROFILE
+       * -----------------------------------------------
+       *
+       * สำคัญ:
+       * isOwner = false เสมอ
+       * สำหรับการสมัครสมาชิกทั่วไป
+       */
+
+      const newCustomer:
+        CustomerProfile = {
+
+          id: userId,
+
+          email: emailLower,
+
+          nickname:
+            data.nickname.trim(),
+
+          age:
+            Number(data.age) || 0,
+
+          birthDate:
+            data.birthDate || '',
+
+          facePhotoUrl,
+
+          createdAt:
+            new Date().toISOString(),
+
+          orderCount: 0,
+
+          totalSpent: 0,
+
+          status: 'active',
+
+          phone:
+            data.phone || '',
+
+          address:
+            data.address || '',
+
+          /**
+           * ห้ามรับ data.isOwner
+           */
+          isOwner: false,
+
+          roles: ['customer'],
+        };
+
+
+      await saveCustomerProfileService(
+        newCustomer
+      );
+
+
+      /**
+       * สมัครเสร็จ → เข้าเป็น customer
+       */
+      saveSession(
+        newCustomer,
+        'customer'
+      );
+
+
+      return {
+        success: true,
+      };
+
+    } catch (error: any) {
+
+      console.error(
+        'Sign up error:',
+        error
+      );
+
+
+      const message =
+        error?.message ||
+        'เกิดข้อผิดพลาดในการสมัครสมาชิก';
+
+
+      setLoginError(message);
+
 
       return {
         success: false,
-        error: 'ไม่พบบัญชีผู้ใช้นี้ กรุณาตรวจสอบอีเมลหรือสมัครสมาชิกใหม่',
+        error: message,
       };
-    } catch (err: any) {
-      return { success: false, error: err.message || 'เข้าสู่ระบบไม่สำเร็จ' };
     }
   };
 
-  const loginAsOwner = async () => {
-    // Check if an existing profile for owner email already exists to reuse
-    const customers = await getCustomersService();
-    let ownerProfile = customers.find((c) => c.email.toLowerCase() === OWNER_EMAIL.toLowerCase());
 
-    if (!ownerProfile) {
-      ownerProfile = {
-        id: 'owner-main',
-        email: OWNER_EMAIL,
-        nickname: 'เจ้าของร้าน (Admin)',
-        age: 30,
-        createdAt: new Date().toISOString(),
-        orderCount: 0,
-        totalSpent: 0,
-        status: 'active',
-        phone: '089-123-4567',
-        address: 'ร้านค้าหลัก',
-        isOwner: true,
-        roles: ['customer', 'owner'],
+  /**
+   * =======================================================
+   * LOGIN
+   * =======================================================
+   */
+
+  const login = async (
+    email: string,
+    password: string
+  ): Promise<{
+    success: boolean;
+    error?: string;
+  }> => {
+
+    try {
+
+      setLoginError(null);
+
+
+      const emailLower =
+        email
+          .trim()
+          .toLowerCase();
+
+
+      if (!emailLower || !password) {
+
+        return {
+          success: false,
+          error:
+            'กรุณากรอกอีเมลและรหัสผ่าน',
+        };
+      }
+
+
+      const {
+        auth,
+        isConfigured,
+      } = initFirebase();
+
+
+      /**
+       * -----------------------------------------------
+       * FIREBASE LOGIN
+       * -----------------------------------------------
+       */
+
+      if (
+        isConfigured &&
+        auth
+      ) {
+
+        try {
+
+          await signInWithEmailAndPassword(
+            auth,
+            emailLower,
+            password
+          );
+
+        } catch (firebaseError: any) {
+
+          console.error(
+            'Firebase login error:',
+            firebaseError
+          );
+
+
+          if (
+            firebaseError?.code ===
+            'auth/invalid-credential' ||
+            firebaseError?.code ===
+            'auth/invalid-login-credentials' ||
+            firebaseError?.code ===
+            'auth/user-not-found' ||
+            firebaseError?.code ===
+            'auth/wrong-password'
+          ) {
+
+            return {
+              success: false,
+              error:
+                'อีเมลหรือรหัสผ่านไม่ถูกต้อง',
+            };
+          }
+
+
+          return {
+            success: false,
+            error:
+              firebaseError?.message ||
+              'เข้าสู่ระบบไม่สำเร็จ',
+          };
+        }
+      }
+
+
+      /**
+       * -----------------------------------------------
+       * FIND PROFILE
+       * -----------------------------------------------
+       */
+
+      const customers =
+        await getCustomersService();
+
+
+      const matched =
+        customers.find(
+          (customer) =>
+            String(customer.email || '')
+              .trim()
+              .toLowerCase() ===
+            emailLower
+        );
+
+
+      /**
+       * -----------------------------------------------
+       * PROFILE NOT FOUND
+       * -----------------------------------------------
+       */
+
+      if (!matched) {
+
+        return {
+          success: false,
+          error:
+            'ไม่พบข้อมูลบัญชี กรุณาสมัครสมาชิกก่อน',
+        };
+      }
+
+
+      /**
+       * -----------------------------------------------
+       * OWNER CHECK
+       * -----------------------------------------------
+       */
+
+      const owner =
+        emailLower ===
+        OWNER_EMAIL
+          .trim()
+          .toLowerCase();
+
+
+      let safeUser:
+        CustomerProfile;
+
+
+      if (owner) {
+
+        safeUser = {
+          ...matched,
+
+          isOwner: true,
+
+          roles: [
+            'customer',
+            'owner',
+          ],
+        };
+
+      } else {
+
+        safeUser = {
+          ...matched,
+
+          isOwner: false,
+
+          roles: ['customer'],
+        };
+      }
+
+
+      await saveCustomerProfileService(
+        safeUser
+      );
+
+
+      /**
+       * เจ้าของเข้า owner
+       * ลูกค้าทั่วไปเข้า customer
+       */
+      saveSession(
+        safeUser,
+        owner
+          ? 'owner'
+          : 'customer'
+      );
+
+
+      return {
+        success: true,
       };
-      await saveCustomerProfileService(ownerProfile);
-    } else {
-      ownerProfile = {
-        ...ownerProfile,
-        isOwner: true,
-        roles: ['customer', 'owner'],
+
+    } catch (error: any) {
+
+      console.error(
+        'Login error:',
+        error
+      );
+
+
+      const message =
+        error?.message ||
+        'เข้าสู่ระบบไม่สำเร็จ';
+
+
+      setLoginError(message);
+
+
+      return {
+        success: false,
+        error: message,
       };
-      await saveCustomerProfileService(ownerProfile);
+    }
+  };
+
+
+  /**
+   * =======================================================
+   * LOGIN AS OWNER
+   * =======================================================
+   *
+   * ใช้สำหรับปุ่ม/เมนูเดิมที่ App.tsx เรียก
+   *
+   * จะไม่สามารถทำให้บัญชีอื่นกลายเป็น owner ได้
+   */
+
+  const loginAsOwner = async (): Promise<void> => {
+
+    if (!currentUser) {
+
+      throw new Error(
+        'กรุณาเข้าสู่ระบบก่อน'
+      );
     }
 
-    saveSession(ownerProfile, 'owner');
+
+    if (
+      !checkIsOwnerAccount(
+        currentUser
+      )
+    ) {
+
+      throw new Error(
+        'บัญชีนี้ไม่มีสิทธิ์เจ้าของร้าน'
+      );
+    }
+
+
+    saveSession(
+      currentUser,
+      'owner'
+    );
   };
 
-  const switchRole = (newRole: UserRole) => {
-    setRole(newRole);
-    localStorage.setItem(ROLE_STORAGE_KEY, newRole);
+
+  /**
+   * =======================================================
+   * SWITCH ROLE
+   * =======================================================
+   */
+
+  const switchRole = (
+    newRole: UserRole
+  ): void => {
+
+    /**
+     * customer เท่านั้น
+     */
+    if (
+      newRole === 'customer'
+    ) {
+
+      setRole('customer');
+
+      localStorage.setItem(
+        ROLE_STORAGE_KEY,
+        'customer'
+      );
+
+      return;
+    }
+
+
+    /**
+     * owner ต้องตรวจสิทธิ์ทุกครั้ง
+     */
+    if (
+      newRole === 'owner' &&
+      checkIsOwnerAccount(
+        currentUser
+      )
+    ) {
+
+      setRole('owner');
+
+      localStorage.setItem(
+        ROLE_STORAGE_KEY,
+        'owner'
+      );
+
+      return;
+    }
+
+
+    /**
+     * ไม่มีสิทธิ์ → customer
+     */
+    setRole('customer');
+
+    localStorage.setItem(
+      ROLE_STORAGE_KEY,
+      'customer'
+    );
   };
 
-  const toggleRole = () => {
-    const nextRole: UserRole = role === 'owner' ? 'customer' : 'owner';
+
+  /**
+   * =======================================================
+   * TOGGLE ROLE
+   * =======================================================
+   */
+
+  const toggleRole = (): void => {
+
+    if (
+      !checkIsOwnerAccount(
+        currentUser
+      )
+    ) {
+
+      setRole('customer');
+
+      return;
+    }
+
+
+    const nextRole: UserRole =
+      role === 'owner'
+        ? 'customer'
+        : 'owner';
+
+
     switchRole(nextRole);
   };
 
-  const grantOwnerPermission = async (isOwnerPermission: boolean) => {
-    if (!currentUser) return;
-    const currentRoles = currentUser.roles || ['customer'];
-    const updatedRoles: UserRole[] = isOwnerPermission
-      ? Array.from(new Set([...currentRoles, 'owner']))
-      : currentRoles.filter((r) => r !== 'owner');
 
-    const updatedUser: CustomerProfile = {
-      ...currentUser,
-      isOwner: isOwnerPermission,
-      roles: updatedRoles,
-      updatedAt: new Date().toISOString(),
-    };
+  /**
+   * =======================================================
+   * GRANT OWNER PERMISSION
+   * =======================================================
+   *
+   * ไม่อนุญาตให้ผู้ใช้ทั่วไปเรียกฟังก์ชันนี้
+   * แล้วทำให้ตัวเองเป็นเจ้าของ
+   *
+   * เจ้าของจะถูกกำหนดจาก OWNER_EMAIL เท่านั้น
+   */
 
-    await saveCustomerProfileService(updatedUser);
-    saveSession(updatedUser, isOwnerPermission ? role : 'customer');
+  const grantOwnerPermission = async (
+    isOwnerPermission: boolean
+  ): Promise<void> => {
+
+    if (!currentUser) {
+      return;
+    }
+
+
+    /**
+     * ถ้าไม่ใช่ owner account
+     * ไม่สามารถ grant ตัวเองได้
+     */
+    if (
+      !checkIsOwnerAccount(
+        currentUser
+      )
+    ) {
+
+      setRole('customer');
+
+      return;
+    }
+
+
+    const updatedUser:
+      CustomerProfile = {
+
+        ...currentUser,
+
+        isOwner:
+          isOwnerPermission,
+
+        roles:
+          isOwnerPermission
+            ? [
+                'customer',
+                'owner',
+              ]
+            : ['customer'],
+      };
+
+
+    await saveCustomerProfileService(
+      updatedUser
+    );
+
+
+    saveSession(
+      updatedUser,
+      isOwnerPermission
+        ? 'owner'
+        : 'customer'
+    );
   };
 
-  const logout = async () => {
-    const { auth, isConfigured } = initFirebase();
-    if (isConfigured && auth) {
-      try {
-        await firebaseSignOut(auth);
-      } catch (e) {
-        console.error('Firebase sign out error:', e);
+
+  /**
+   * =======================================================
+   * LOGOUT
+   * =======================================================
+   */
+
+  const logout = async (): Promise<void> => {
+
+    try {
+
+      const {
+        auth,
+        isConfigured,
+      } = initFirebase();
+
+
+      if (
+        isConfigured &&
+        auth
+      ) {
+
+        await firebaseSignOut(
+          auth
+        );
       }
+
+    } catch (error) {
+
+      console.warn(
+        'Firebase logout error:',
+        error
+      );
+
+    } finally {
+
+      saveSession(
+        null,
+        'customer'
+      );
+
+      setLoginError(null);
     }
-    saveSession(null, 'customer');
   };
 
-  const updateProfile = async (data: Partial<CustomerProfile>, newFacePhoto?: File | string) => {
-    if (!currentUser) return;
-    let facePhotoUrl = data.facePhotoUrl || currentUser.facePhotoUrl;
+
+  /**
+   * =======================================================
+   * UPDATE PROFILE
+   * =======================================================
+   */
+
+  const updateProfile = async (
+    data: Partial<CustomerProfile>,
+    newFacePhoto?: File | string
+  ): Promise<void> => {
+
+    if (!currentUser) {
+
+      throw new Error(
+        'ยังไม่ได้เข้าสู่ระบบ'
+      );
+    }
+
+
+    let facePhotoUrl =
+      currentUser.facePhotoUrl || '';
+
+
+    /**
+     * Upload รูปใหม่
+     */
     if (newFacePhoto) {
-      const uploadPath = `customer_verifications/${currentUser.id}/face_${Date.now()}.jpg`;
-      facePhotoUrl = await uploadImageService(newFacePhoto, uploadPath);
+
+      const uploadPath =
+        `customer_verifications/${currentUser.id}/face_${Date.now()}.jpg`;
+
+
+      facePhotoUrl =
+        await uploadImageService(
+          newFacePhoto,
+          uploadPath
+        );
     }
 
-    const updated: CustomerProfile = {
-      ...currentUser,
-      ...data,
-      facePhotoUrl,
-      updatedAt: new Date().toISOString(),
-    };
-    await saveCustomerProfileService(updated);
-    saveSession(updated, role);
+
+    /**
+     * -----------------------------------------------
+     * ป้องกันการแก้สิทธิ์ owner
+     * -----------------------------------------------
+     */
+
+    const owner =
+      checkIsOwnerAccount(
+        currentUser
+      );
+
+
+    const updatedUser:
+      CustomerProfile = {
+
+        ...currentUser,
+
+        ...data,
+
+        facePhotoUrl,
+
+        /**
+         * owner ถูกกำหนดจาก email เท่านั้น
+         */
+        isOwner: owner,
+
+        roles: owner
+          ? [
+              'customer',
+              'owner',
+            ]
+          : ['customer'],
+      };
+
+
+    await saveCustomerProfileService(
+      updatedUser
+    );
+
+
+    /**
+     * ถ้าเป็น owner ให้คง role เดิม
+     * ถ้าไม่ใช่ owner ให้กลับ customer
+     */
+    const safeRole: UserRole =
+      owner && role === 'owner'
+        ? 'owner'
+        : 'customer';
+
+
+    saveSession(
+      updatedUser,
+      safeRole
+    );
   };
 
-  const hasOwnerPrivilege = checkHasOwnerPrivilege(currentUser);
+
+  /**
+   * =======================================================
+   * CONTEXT VALUE
+   * =======================================================
+   */
+
+  const value: AuthContextType = {
+
+    currentUser,
+
+    role: effectiveRole,
+
+    isOwner:
+      checkIsOwnerAccount(
+        currentUser
+      ) &&
+      effectiveRole === 'owner',
+
+    isAuthenticated:
+      !!currentUser,
+
+    isLoading,
+
+    loginError,
+
+    signUpCustomer,
+
+    login,
+
+    loginAsOwner,
+
+    switchRole,
+
+    toggleRole,
+
+    grantOwnerPermission,
+
+    logout,
+
+    updateProfile,
+  };
+
 
   return (
     <AuthContext.Provider
-      value={{
-        currentUser,
-        role,
-        isOwner: hasOwnerPrivilege,
-        isAuthenticated: !!currentUser,
-        isLoading,
-        loginError,
-        signUpCustomer,
-        login,
-        loginAsOwner,
-        switchRole,
-        toggleRole,
-        grantOwnerPermission,
-        logout,
-        updateProfile,
-      }}
+      value={value}
     >
       {children}
     </AuthContext.Provider>
   );
 };
 
-export const useAuth = () => {
-  const context = useContext(AuthContext);
+
+/**
+ * =========================================================
+ * USE AUTH
+ * =========================================================
+ */
+
+export const useAuth = (): AuthContextType => {
+
+  const context =
+    useContext(AuthContext);
+
+
   if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
+
+    throw new Error(
+      'useAuth must be used inside AuthProvider'
+    );
   }
+
+
   return context;
 };
+
+
+export default AuthContext;
