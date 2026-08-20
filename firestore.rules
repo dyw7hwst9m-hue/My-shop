@@ -1,0 +1,79 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'thitapornmukji@gmail.com' ||
+        request.auth.token.role == 'owner' ||
+        get(/databases/$(database)/documents/shop/settings).data.ownerEmail == request.auth.token.email
+      );
+    }
+
+    function isUser(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // 1. Shop Settings
+    match /shop/{document=**} {
+      allow read: if true; // Public can see shop name, announcement, open status, promptpay
+      allow write: if isOwner(); // Only shop owner can edit settings
+    }
+
+    // 2. Products
+    match /products/{productId} {
+      allow read: if true; // Public can browse products
+      allow create, update, delete: if isOwner(); // Only owner can add/edit/delete/toggle status
+    }
+
+    // 3. Categories
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow create, update, delete: if isOwner();
+    }
+
+    // 4. Customers Profiles & Identity Verification
+    match /customers/{userId} {
+      // Owner can view all customers and identity photos; Customer can only view/edit their own profile
+      allow read: if isOwner() || isUser(userId);
+      allow create: if isUser(userId);
+      allow update: if isUser(userId) || isOwner();
+      allow delete: if isOwner();
+    }
+
+    // 5. Orders
+    match /orders/{orderId} {
+      // Owner can read all orders; Customer can read only their own orders
+      allow read: if isOwner() || (isAuthenticated() && resource.data.customerId == request.auth.uid);
+      
+      // Customer can create an order for themselves with initial valid status
+      allow create: if isAuthenticated() && 
+                    request.resource.data.customerId == request.auth.uid &&
+                    (request.resource.data.status == 'pending_payment' || request.resource.data.status == 'verifying_payment');
+      
+      // Customer can only update their own order to attach slip (status: 'verifying_payment')
+      // Only Owner can change status to 'paid', 'preparing', 'ready', 'completed', 'cancelled'
+      allow update: if isOwner() || (
+        isAuthenticated() && 
+        resource.data.customerId == request.auth.uid &&
+        request.resource.data.customerId == request.auth.uid &&
+        request.resource.data.status == 'verifying_payment' &&
+        resource.data.status == 'pending_payment'
+      );
+      
+      allow delete: if isOwner();
+    }
+
+    // 6. Reviews
+    match /reviews/{reviewId} {
+      allow read: if true; // Public can read all verified product reviews
+      allow create: if isAuthenticated() && request.resource.data.customerId == request.auth.uid;
+      allow update, delete: if isOwner() || (isAuthenticated() && resource.data.customerId == request.auth.uid);
+    }
+  }
+}

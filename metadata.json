@@ -1,0 +1,6 @@
+{
+  "name": "ร้านของฉัน",
+  "description": "เว็บแอปพลิเคชัน Mobile-first สำหรับร้านค้าออนไลน์ พร้อมระบบเจ้าของร้าน จัดการสินค้า ออเดอร์ ลูกค้า และระบบช้อปปิ้ง",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

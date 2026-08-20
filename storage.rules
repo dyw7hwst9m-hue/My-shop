@@ -1,0 +1,42 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'thitapornmukji@gmail.com' ||
+        request.auth.token.role == 'owner'
+      );
+    }
+
+    // 1. Customer private identity verification face photos
+    // Strictly NOT public! Only Owner and the owner of the face photo can read
+    match /customer_verifications/{userId}/{allPaths=**} {
+      allow read: if isOwner() || (isAuthenticated() && request.auth.uid == userId);
+      allow write: if isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // 2. Payment Slips
+    // Readable by Owner and the customer who made the order
+    match /payment_slips/{userId}/{allPaths=**} {
+      allow read: if isOwner() || (isAuthenticated() && request.auth.uid == userId);
+      allow write: if isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // 3. Product & Store images
+    // Public read, write by owner only
+    match /products/{allPaths=**} {
+      allow read: if true;
+      allow write: if isOwner();
+    }
+
+    match /shop/{allPaths=**} {
+      allow read: if true;
+      allow write: if isOwner();
+    }
+  }
+}
